@@ -2,252 +2,238 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mask transfer</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: light-dark(#f6f6f4, #17181a);
-    --panel: light-dark(#fff, #222327);
-    --line: light-dark(#d9d9d4, #3a3b40);
-    --muted: light-dark(#6b6b66, #9a9aa0);
-    --accent: light-dark(#2459d6, #7aa2ff);
-    --warn: light-dark(#a15c00, #f0b45a);
-    font: 15px/1.45 system-ui, sans-serif;
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Background Removal Scaler</title>
+<meta name="description" content="Apply the transparency of a low-resolution cutout to the full-resolution photo. Edge-aware, lossless PNG, runs entirely in your browser.">
+<meta name="color-scheme" content="light dark">
+<script>
+  try { const t = localStorage.getItem("brs-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch { }
+  // Cross-origin isolation via coi-sw.js enables multi-threaded codecs; reload once when it first takes control.
+  if (!self.crossOriginIsolated && isSecureContext && navigator.serviceWorker) {
+    navigator.serviceWorker.register("coi-sw.js").then((reg) => {
+      const reload = () => { if (!sessionStorage.getItem("coi-reload")) { sessionStorage.setItem("coi-reload", "1"); location.reload(); } };
+      if (reg.active && !navigator.serviceWorker.controller) reload();
+      navigator.serviceWorker.addEventListener("controllerchange", reload);
+    }, () => { });
   }
-  body { margin: 0; background: var(--bg); }
-  main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 40px; }
-  h1 { font-size: 1.4rem; margin: 0 0 4px; }
-  header p { margin: 0 0 20px; color: var(--muted); }
-  .inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  @media (max-width: 640px) { .inputs { grid-template-columns: 1fr; } }
-  .drop {
-    display: block; padding: 16px; border: 2px dashed var(--line); border-radius: 10px;
-    background: var(--panel); cursor: pointer; transition: border-color .15s;
-  }
-  .drop:hover, .drop.over { border-color: var(--accent); }
-  .drop.done { border-style: solid; }
-  .drop input { display: none; }
-  .drop strong { display: block; }
-  .drop span, .drop small { color: var(--muted); }
-  .drop small { display: block; margin-top: 6px; overflow-wrap: anywhere; }
-  .controls {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; margin: 16px 0 8px;
-    padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  }
-  .controls label { display: inline-flex; align-items: center; gap: 8px; }
-  .controls fieldset { border: 0; padding: 0; margin: 0; display: inline-flex; gap: 10px; align-items: center; }
-  .controls legend { float: left; margin-right: 4px; }
-  output { min-width: 3.5em; font-variant-numeric: tabular-nums; }
-  button {
-    margin-left: auto; font: inherit; font-weight: 600; padding: 8px 18px; border: 0; border-radius: 8px;
-    background: var(--accent); color: light-dark(#fff, #10131a); cursor: pointer;
-  }
-  button:disabled { opacity: .45; cursor: default; }
-  #status { min-height: 1.4em; color: var(--muted); margin: 4px 2px; }
-  #status .warn { color: var(--warn); }
-  #status div { margin: 2px 0; }
-  .stage {
-    margin-top: 8px; overflow: auto; max-height: 78vh; border: 1px solid var(--line); border-radius: 10px;
-    background: var(--panel); text-align: center;
-  }
-  .stage:empty { display: none; }
-  canvas { display: block; margin: 0 auto; max-width: 100%; max-height: calc(78vh - 2px); cursor: zoom-in; }
-  .stage.zoom { text-align: left; }
-  .stage.zoom canvas { max-width: none; max-height: none; cursor: zoom-out; image-rendering: pixelated; }
-  .stage[data-bg="checker"] canvas { background: repeating-conic-gradient(#c8c8c8 0 25%, #fff 0 50%) 0 0 / 16px 16px; }
-  .stage[data-bg="white"] canvas { background: #fff; }
-  .stage[data-bg="black"] canvas { background: #000; }
-  .hint { color: var(--muted); font-size: .85rem; margin: 6px 2px; }
-</style>
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23161513'/%3E%3Crect x='7' y='7' width='18' height='18' fill='none' stroke='%23f2f0eb' stroke-width='2'/%3E%3Crect x='7' y='16' width='9' height='9' fill='%23ec5b24'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Mask transfer</h1>
-    <p>Applies the transparency of a low-resolution cutout to the full-resolution original and saves it as a
-      lossless PNG. Everything runs locally in your browser — no upload.</p>
-  </header>
+<div class="app" id="app" data-showing="false">
 
-  <section class="inputs">
-    <label class="drop" data-kind="original">
-      <input type="file" accept="image/*">
-      <strong>1 · Original</strong>
-      <span>full resolution, e.g. JPEG</span>
-      <small></small>
-    </label>
-    <label class="drop" data-kind="cutout">
-      <input type="file" accept="image/png,image/webp,image/avif,image/*">
-      <strong>2 · Cutout</strong>
-      <span>low resolution, transparent background</span>
-      <small></small>
-    </label>
-  </section>
+  <aside class="panel" aria-label="Settings">
+    <header class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="5" width="22" height="22"/><rect x="5" y="16" width="11" height="11" class="fill"/></svg>
+      <div class="brand-text">
+        <h1>Background Removal Scaler</h1>
+        <p>cutout alpha → full-res PNG</p>
+      </div>
+      <div class="theme" role="radiogroup" aria-label="Color theme">
+        <label title="Follow system"><input type="radio" name="theme" value="auto"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="solid"/></svg></label>
+        <label title="Light"><input type="radio" name="theme" value="light"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></label>
+        <label title="Dark"><input type="radio" name="theme" value="dark"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></label>
+      </div>
+    </header>
 
-  <form class="controls" id="controls">
-    <label>Background opacity
-      <input type="range" name="opacity" min="0" max="100" step="1" value="0">
-      <output name="opacityOut">0 %</output>
-    </label>
-    <fieldset>
-      <legend>Mask upscaling</legend>
-      <label><input type="radio" name="resample" value="nearest" checked> Nearest</label>
-      <label><input type="radio" name="resample" value="bilinear"> Bilinear</label>
-    </fieldset>
-    <fieldset>
-      <legend>Preview on</legend>
-      <label><input type="radio" name="bg" value="checker" checked> Checker</label>
-      <label><input type="radio" name="bg" value="white"> White</label>
-      <label><input type="radio" name="bg" value="black"> Black</label>
-    </fieldset>
-    <button type="button" id="download" disabled>Download PNG</button>
-  </form>
+    <section class="group" aria-labelledby="h-images">
+      <h2 id="h-images"><span class="num">01</span>Images</h2>
+      <div class="slots">
+        <button class="slot" type="button" data-slot="original">
+          <span class="thumb"><img alt="" hidden><i>A</i></span>
+          <span class="slot-text">
+            <strong>Original photo</strong>
+            <small data-meta></small>
+          </span>
+          <span class="slot-state" aria-hidden="true"></span>
+        </button>
+        <button class="slot" type="button" data-slot="cutout">
+          <span class="thumb checker"><img alt="" hidden><i>B</i></span>
+          <span class="slot-text">
+            <strong>Cutout</strong>
+            <small data-meta></small>
+          </span>
+          <span class="slot-state" aria-hidden="true"></span>
+        </button>
+        <button class="swap" type="button" id="swap" title="Swap the two images" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v14m0 0-3-3m3 3 3-3M17 20V6m0 0-3 3m3-3 3 3"/></svg>swap
+        </button>
+      </div>
+      <input type="file" id="file-input" accept="image/*" multiple hidden>
+    </section>
 
-  <div id="status"></div>
-  <div class="stage" id="stage" data-bg="checker"></div>
-  <p class="hint" id="hint" hidden>Click the preview to toggle 100 % zoom.</p>
-</main>
+    <section class="group" aria-labelledby="h-edges">
+      <h2 id="h-edges"><span class="num">02</span>Edges</h2>
+      <div class="segmented" role="radiogroup" aria-label="Mask upscaling">
+        <label><input type="radio" name="method" value="nearest"><span>Nearest</span></label>
+        <label><input type="radio" name="method" value="bilinear"><span>Smooth</span></label>
+        <label><input type="radio" name="method" value="refine" checked><span>Edge-aware</span></label>
+      </div>
+      <p class="hint" id="method-hint"></p>
+      <div class="refine-only">
+        <div class="field">
+          <div class="field-head">
+            <label for="radius">Edge width</label>
+            <span class="readout"><button type="button" class="link" id="radius-auto" hidden>reset</button><output id="radius-out" for="radius"></output></span>
+          </div>
+          <input type="range" id="radius" min="2" max="48" step="1" value="8">
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <label for="detail">Detail</label>
+            <output class="readout" id="detail-out" for="detail"></output>
+          </div>
+          <input type="range" id="detail" min="0" max="9" step="1" value="6">
+          <div class="scale" aria-hidden="true"><span>smoother</span><span>sharper</span></div>
+        </div>
+      </div>
+    </section>
 
-<script type="module">
-const worker = new Worker(new URL("./worker.js", import.meta.url));
-const form = document.getElementById("controls");
-const stage = document.getElementById("stage");
-const statusEl = document.getElementById("status");
-const downloadBtn = document.getElementById("download");
-const canvas = document.createElement("canvas");
-const view = canvas.getContext("bitmaprenderer");
+    <section class="group" aria-labelledby="h-bg">
+      <h2 id="h-bg"><span class="num">03</span>Background</h2>
+      <div class="field">
+        <div class="field-head">
+          <label for="opacity">Opacity</label>
+          <output class="readout" id="opacity-out" for="opacity"></output>
+        </div>
+        <input type="range" id="opacity" min="0" max="100" step="1" value="0">
+        <div class="scale" aria-hidden="true"><span>transparent</span><span>original</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="clear" role="switch">
+        <span class="track" aria-hidden="true"></span>
+        <span class="switch-text">Clear hidden pixels<small id="clear-hint"></small></span>
+      </label>
+    </section>
 
-const files = { original: null, cutout: null };
-const info = { original: null, cutout: null };
-let previewBusy = false, previewDirty = false, exporting = false;
-let lastPreview = null, saved = null, errorMsg = null;
+    <section class="group" aria-labelledby="h-export">
+      <h2 id="h-export"><span class="num">04</span>Export</h2>
+      <div class="segmented" role="radiogroup" aria-label="File format">
+        <label title="Lossless, keeps transparency"><input type="radio" name="format" value="png" checked><span>PNG</span></label>
+        <label title="MozJPEG, on a matte color"><input type="radio" name="format" value="jpeg"><span>JPEG</span></label>
+        <label title="libwebp, on a matte color"><input type="radio" name="format" value="webp"><span>WebP</span></label>
+        <label title="AV1 image, on a matte color"><input type="radio" name="format" value="avif"><span>AVIF</span></label>
+      </div>
+      <p class="hint" id="format-hint"></p>
+      <div class="field png-only">
+        <label for="optimize">Compression <span class="muted">· always lossless</span></label>
+        <select id="optimize">
+          <option value="off">Standard — fastest</option>
+          <option value="2">OxiPNG level 2 — fast</option>
+          <option value="6">OxiPNG max — smallest</option>
+        </select>
+      </div>
+      <div class="field lossy-only">
+        <div class="field-head"><span class="label">Matte</span><output class="readout" id="matte-out"></output></div>
+        <div class="swatches" role="radiogroup" aria-label="Matte color">
+          <label title="White"><input type="radio" name="matte" value="#ffffff" checked><span class="sw" style="background:#fff"></span></label>
+          <label title="Black"><input type="radio" name="matte" value="#000000"><span class="sw" style="background:#000"></span></label>
+          <label title="Custom color"><input type="radio" name="matte" value="custom"><span class="sw custom" id="matte-sw"></span></label>
+          <input type="color" id="matte-color" value="#3fa34d" aria-label="Custom matte color">
+        </div>
+      </div>
+      <div class="field lossy-only">
+        <div class="field-head"><label for="quality">Quality</label><output class="readout" id="quality-out" for="quality"></output></div>
+        <input type="range" id="quality" min="40" max="100" step="1" value="90">
+        <div class="scale" aria-hidden="true"><span>smaller</span><span>better</span></div>
+      </div>
+      <div class="field">
+        <label for="filename">File name</label>
+        <input type="text" id="filename" spellcheck="false" autocomplete="off" placeholder="image_masked.png">
+      </div>
+      <div class="actions">
+        <button type="button" class="btn primary" id="download" disabled><span id="download-label">Download PNG</span> <kbd>Ctrl S</kbd></button>
+        <button type="button" class="btn" id="copy" disabled title="Copy as PNG to the clipboard (Ctrl C)">Copy</button>
+      </div>
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><i id="progress-bar"></i></div>
+        <div class="progress-row"><span id="progress-text"></span><button type="button" class="link" id="skip">skip</button></div>
+      </div>
+      <p class="result" id="result" role="status" aria-live="polite"></p>
+    </section>
 
-const params = () => ({ bgAlpha: form.elements.opacity.value / 100, method: form.elements.resample.value });
-const send = (msg) => worker.postMessage({ ...msg, params: params() });
+    <section class="group details" id="details" hidden aria-labelledby="h-details">
+      <h2 id="h-details"><span class="num">—</span>Details</h2>
+      <ul class="notes" id="notes"></ul>
+      <dl id="info"></dl>
+      <details class="cli">
+        <summary>Same result with apply_mask.py</summary>
+        <code id="cli"></code>
+      </details>
+    </section>
 
-// ---- inputs ----
-for (const drop of document.querySelectorAll(".drop")) {
-  const kind = drop.dataset.kind;
-  const input = drop.querySelector("input");
-  input.addEventListener("change", () => input.files[0] && pick(kind, input.files[0]));
-  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    drop.classList.remove("over");
-    const f = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
-    if (f.length === 2) {
-      // both dropped at once: the cutout is the one that is a PNG/WebP, else the smaller file
-      const isCut = (x) => /png|webp|avif/.test(x.type);
-      const [a, b] = isCut(f[0]) !== isCut(f[1]) ? (isCut(f[0]) ? [f[1], f[0]] : f) : f.sort((x, y) => y.size - x.size);
-      pick("original", a); pick("cutout", b);
-    } else if (f[0]) pick(kind, f[0]);
-  });
-}
+    <footer class="foot">
+      <span>Processed locally. Nothing is uploaded.</span>
+      <span><button type="button" class="link" id="show-help">Shortcuts</button><span id="source-link"></span></span>
+    </footer>
+  </aside>
 
-function pick(kind, file) {
-  files[kind] = file;
-  info[kind] = null;
-  saved = errorMsg = null;
-  const drop = document.querySelector(`.drop[data-kind="${kind}"]`);
-  drop.classList.remove("done");
-  drop.querySelector("small").textContent = `${file.name} — decoding…`;
-  send({ type: kind, file });
-  render();
-}
+  <main class="stage" id="stage">
+    <canvas id="view" aria-label="Preview"></canvas>
+    <span class="crop tl"></span><span class="crop tr"></span><span class="crop bl"></span><span class="crop br"></span>
 
-form.addEventListener("input", (e) => {
-  form.elements.opacityOut.value = `${form.elements.opacity.value} %`;
-  if (e.target.name === "bg") { stage.dataset.bg = form.elements.bg.value; return; }
-  saved = null;
-  if (previewBusy) previewDirty = true;
-  else { previewBusy = true; send({ type: "params" }); }
-  render();
-});
+    <div class="empty" id="empty">
+      <div class="empty-body">
+        <h2>Put a small cutout back on its full-size photo.</h2>
+        <div class="picks">
+          <button type="button" class="pick" data-pick="original"><span class="num">A</span><b>Choose original photo</b><small>full resolution · JPEG, PNG or WebP</small></button>
+          <button type="button" class="pick" data-pick="cutout"><span class="num">B</span><b>Choose cutout</b><small>same picture, small, transparent background</small></button>
+        </div>
+        <p class="muted empty-more"><span id="paste-wrap"><button type="button" class="link" id="paste-btn">Paste an image</button> from the clipboard · </span>dragging files onto the page works too.</p>
+      </div>
+    </div>
+    <div class="banner" id="banner" hidden>
+      <span id="banner-text"></span>
+      <button type="button" class="btn primary" id="banner-btn"></button>
+    </div>
 
-downloadBtn.addEventListener("click", () => {
-  exporting = true;
-  saved = errorMsg = null;
-  send({ type: "export" });
-  render();
-});
+    <div class="toolbar top-left" id="tb-view" hidden>
+      <div class="segmented compact" role="radiogroup" aria-label="Preview">
+        <label title="Result (V)"><input type="radio" name="view" value="result" checked><span>Result</span></label>
+        <label title="Alpha mask (V)"><input type="radio" name="view" value="alpha"><span>Alpha</span></label>
+        <label title="Original (hold Space)"><input type="radio" name="view" value="original"><span>Original</span></label>
+      </div>
+    </div>
+    <div class="toolbar top-right" id="tb-bg" hidden>
+      <span class="tb-label">bg</span>
+      <div class="swatches" role="radiogroup" aria-label="Preview background (B)">
+        <label title="Checkerboard"><input type="radio" name="bg" value="checker" checked><span class="sw checker"></span></label>
+        <label title="White"><input type="radio" name="bg" value="#ffffff"><span class="sw" style="background:#fff"></span></label>
+        <label title="Black"><input type="radio" name="bg" value="#000000"><span class="sw" style="background:#000"></span></label>
+        <label title="Custom color"><input type="radio" name="bg" value="custom"><span class="sw custom" id="custom-sw"></span></label>
+        <input type="color" id="custom-color" value="#3fa34d" aria-label="Custom background color">
+      </div>
+    </div>
+    <div class="toolbar bottom-right" id="tb-zoom" hidden>
+      <button type="button" class="tb-btn" id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <button type="button" class="tb-btn zoom-label" id="zoom-label" title="Toggle fit / 100 %">100 %</button>
+      <button type="button" class="tb-btn" id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <span class="sep"></span>
+      <button type="button" class="tb-btn" id="fit" title="Fit to window (F)">fit</button>
+      <button type="button" class="tb-btn" id="one" title="Actual pixels (1)">1:1</button>
+    </div>
+    <div class="status-line" id="status-line" hidden><span class="pulse" aria-hidden="true"></span><span id="busy-text"></span></div>
+    <div class="drop-overlay" id="drop-overlay" hidden><span>drop to add · onto A or B to replace</span></div>
+  </main>
+</div>
 
-canvas.addEventListener("click", (e) => {
-  const r = canvas.getBoundingClientRect();
-  const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
-  stage.classList.toggle("zoom");
-  if (stage.classList.contains("zoom")) {
-    stage.scrollLeft = fx * canvas.width - stage.clientWidth / 2;
-    stage.scrollTop = fy * canvas.height - stage.clientHeight / 2;
-  }
-});
-
-// ---- worker replies ----
-worker.onmessage = ({ data: msg }) => {
-  switch (msg.type) {
-    case "loaded": {
-      info[msg.which] = msg.info;
-      const drop = document.querySelector(`.drop[data-kind="${msg.which}"]`);
-      drop.classList.add("done");
-      drop.querySelector("small").textContent = `${files[msg.which].name} — ${msg.info.w} × ${msg.info.h}`;
-      break;
-    }
-    case "preview": {
-      if (canvas.width !== msg.bitmap.width) canvas.width = msg.bitmap.width;
-      if (canvas.height !== msg.bitmap.height) canvas.height = msg.bitmap.height;
-      view.transferFromImageBitmap(msg.bitmap);
-      if (!canvas.isConnected) stage.append(canvas);
-      lastPreview = msg;
-      // fall through
-    }
-    case "idle":
-      previewBusy = false;
-      if (previewDirty) { previewDirty = false; previewBusy = true; send({ type: "params" }); }
-      break;
-    case "progress":
-      downloadBtn.textContent = `Encoding… ${Math.round(msg.value * 100)} %`;
-      return;
-    case "png": {
-      exporting = false;
-      const name = files.original.name.replace(/\.[^.]+$/, "") + "_masked.png";
-      const url = URL.createObjectURL(msg.blob);
-      Object.assign(document.createElement("a"), { href: url, download: name }).click();
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      saved = `Saved ${name} — ${(msg.blob.size / 1e6).toFixed(1)} MB in ${(msg.ms / 1000).toFixed(1)} s`;
-      break;
-    }
-    case "error":
-      exporting = previewBusy = false;
-      errorMsg = msg.message;
-      break;
-  }
-  render();
-};
-worker.onerror = (e) => { errorMsg = e.message || "Worker failed to start"; render(); };
-
-// ---- status ----
-function render() {
-  const ready = info.original && info.cutout;
-  downloadBtn.disabled = !ready || exporting;
-  if (!exporting) downloadBtn.textContent = "Download PNG";
-  document.getElementById("hint").hidden = !lastPreview;
-
-  const lines = [];
-  const add = (text, warn) => lines.push(Object.assign(document.createElement("div"),
-    { textContent: text, className: warn ? "warn" : "" }));
-  if (errorMsg) add(`Error: ${errorMsg}`, true);
-  if (ready) {
-    const { original: o, cutout: c } = info;
-    add(`Mask ${c.w} × ${c.h} → ${o.w} × ${o.h} (×${(o.w / c.w).toFixed(2)}, ${form.elements.resample.value}), ` +
-      `background opacity ${form.elements.opacity.value} %`);
-    if (Math.abs((o.w / o.h) / (c.w / c.h) - 1) > 0.01)
-      add(`Aspect ratios differ — the mask will be stretched.` +
-        (Math.abs((o.w / o.h) / (c.h / c.w) - 1) < 0.01 ? " Looks like a 90° rotation mismatch." : ""), true);
-  }
-  for (const k of ["original", "cutout"]) for (const n of info[k]?.notes ?? []) add(n, /cannot|no transparent|Ignoring/.test(n));
-  if (saved) add(saved);
-  statusEl.replaceChildren(...lines);
-}
-</script>
+<dialog id="help" aria-labelledby="help-title">
+  <h2 id="help-title">Shortcuts</h2>
+  <table>
+    <tr><td><kbd>Ctrl O</kbd></td><td>Choose files</td></tr>
+    <tr><td><kbd>Ctrl V</kbd></td><td>Paste an image</td></tr>
+    <tr><td><kbd>Ctrl S</kbd></td><td>Download</td></tr>
+    <tr><td><kbd>Ctrl C</kbd></td><td>Copy result</td></tr>
+    <tr><td>hold <kbd>Space</kbd></td><td>Show the original</td></tr>
+    <tr><td><kbd>V</kbd></td><td>Result → Alpha → Original</td></tr>
+    <tr><td><kbd>B</kbd></td><td>Next preview background</td></tr>
+    <tr><td><kbd>F</kbd> / <kbd>1</kbd></td><td>Fit / actual pixels</td></tr>
+    <tr><td><kbd>+</kbd> <kbd>−</kbd>, wheel</td><td>Zoom</td></tr>
+    <tr><td>drag, double-click</td><td>Pan, toggle zoom</td></tr>
+  </table>
+  <form method="dialog"><button class="btn">Close</button></form>
+</dialog>
 </body>
 </html>

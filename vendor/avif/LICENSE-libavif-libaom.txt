@@ -1,0 +1,2 @@
+AVIF encoder: libavif (BSD-2-Clause, https://github.com/AOMediaCodec/libavif/blob/main/LICENSE)
+with libaom (BSD-2-Clause plus the AOMedia patent licence, https://aomedia.org/license/).

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["numpy", "pillow"]
+# dependencies = ["numpy", "pillow", "pyoxipng"]
 # ///
 """Transfer the alpha mask of a low-res cutout onto the full-resolution original.
 
     apply_mask.py LARGE SMALL [BG_ALPHA] [-o OUT.png] [--resample nearest|bilinear|refine]
-                  [--radius PX] [--eps EPS] [--clear-transparent]
+                  [--radius PX] [--eps EPS] [--clear-transparent] [--optimize LEVEL] [--zopfli]
+                  [--flatten COLOR] [--quality Q]
 
 LARGE     full-resolution original (e.g. JPEG)
 SMALL     low-res cutout of the same framing with a transparent background (PNG)
@@ -19,16 +20,23 @@ photo with a colour guided filter (He et al.), computed on a subsampled grid.
 
 RGB values of LARGE are copied unchanged (also under transparent pixels) and its
 ICC profile is embedded, so the conversion is lossless. --clear-transparent sets
-RGB to 0 where alpha is 0 (only possible at BG_ALPHA 0) for a smaller file.
+RGB to 0 where alpha is 0 (only possible at BG_ALPHA 0) for a much smaller file.
+The PNG is then losslessly recompressed with OxiPNG (default: --optimize max).
+
+An output name ending in .jpg, .webp or .avif writes a lossy file without alpha: the cutout
+is composited onto --flatten COLOR (default white), c' = round((c*a + m*(255-a)) / 255).
 
 All arithmetic mirrors worker.js, so the web app produces identical pixels.
 """
 import argparse
+import io
+import math
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageColor, ImageOps
 
 
 # ---------- resampling ----------
@@ -62,13 +70,20 @@ def upscale_mask(mask: np.ndarray, w: int, h: int, method: str) -> np.ndarray:
 
 # ---------- edge-aware refinement (fast colour guided filter) ----------
 
+def rnd(x: float) -> int:
+    return math.floor(x + 0.5)                          # round half up, like JS Math.round
+
+
 def default_radius(W: int, sw: int) -> int:
-    return max(2, round(2 * W / sw))
+    return max(2, rnd(2 * W / sw))
+
+
+CLEAN = 0.03     # refined alpha below 3 % -> 0, above 97 % -> 1, linear in between
 
 
 def band_px(radius: int, s: int) -> int:
     # half-width of the refinement band on the subsampled grid (~ radius / 2 full-res px)
-    return max(1, round(radius / (2 * s)))
+    return max(1, rnd(radius / (2 * s)))
 
 
 def _box_sum(x: np.ndarray, r: int) -> np.ndarray:
@@ -87,8 +102,8 @@ def _box_sum(x: np.ndarray, r: int) -> np.ndarray:
 def refine_mask(rgb: np.ndarray, mask: np.ndarray, radius: int, eps: float) -> np.ndarray:
     """rgb: HxWx3 uint8 guide, mask: HxW uint8 (bilinear-upscaled cutout alpha)."""
     H, W = mask.shape
-    s = max(1, round(radius / 4))                       # subsampling factor
-    r = max(1, round(radius / s))                       # radius on the subsampled grid
+    s = max(1, rnd(radius / 4))                         # subsampling factor
+    r = max(1, rnd(radius / s))                         # radius on the subsampled grid
     hl, wl = -(-H // s), -(-W // s)
 
     def block_sum(ch):                                  # exact integer s*s block sums
@@ -151,6 +166,7 @@ def refine_mask(rgb: np.ndarray, mask: np.ndarray, radius: int, eps: float) -> n
         px = rgb[a:e]
         q = A[0] * (px[..., 0] / 255) + A[1] * (px[..., 1] / 255) + A[2] * (px[..., 2] / 255) + A[3]
         m = mask[a:e] / 255
+        q = (q - CLEAN) / (1 - 2 * CLEAN)               # snap near-0/near-1 speckle noise
         q = m + A[4] * (q - m)                          # blend: filter inside the band, mask outside
         out[a:e] = np.clip(np.floor(q * 255 + 0.5), 0, 255)
     return out
@@ -168,10 +184,18 @@ def main() -> int:
                     help="mask upscaling method (default: refine)")
     ap.add_argument("--radius", type=int, help="refine: edge search radius in full-res pixels "
                     "(default: 2 x upscale factor)")
-    ap.add_argument("--eps", type=float, default=1e-3,
-                    help="refine: regularisation; smaller = follows image edges more closely (default 1e-3)")
+    ap.add_argument("--eps", type=float, default=1e-4,
+                    help="refine: regularisation; smaller = follows image edges more closely (default 1e-4)")
     ap.add_argument("--clear-transparent", action="store_true",
-                    help="set RGB to 0 where alpha is 0 (smaller file, no longer lossless there)")
+                    help="set RGB to 0 where alpha is 0 (much smaller file; hidden colours are discarded)")
+    ap.add_argument("--optimize", default="max", choices=["off", *map(str, range(7)), "max"],
+                    help="OxiPNG lossless optimisation level (default: max)")
+    ap.add_argument("--flatten", metavar="COLOR",
+                    help="composite onto COLOR (e.g. white, '#336699') and drop alpha; "
+                         "implied (white) for .jpg/.webp/.avif output")
+    ap.add_argument("--quality", type=int, default=90, help="quality for .jpg/.webp/.avif (default 90)")
+    ap.add_argument("--zopfli", action="store_true",
+                    help="OxiPNG with Zopfli compression: a few %% smaller, many times slower")
     args = ap.parse_args()
     if not 0.0 <= args.bg_alpha <= 1.0:
         ap.error("BG_ALPHA must be between 0 and 1")
@@ -213,9 +237,40 @@ def main() -> int:
     if args.clear_transparent:
         rgba[rgba[..., 3] == 0] = 0
 
-    Image.fromarray(rgba).save(out_path, "PNG", **({"icc_profile": icc} if icc else {}))
+    icc_kw = {"icc_profile": icc} if icc else {}
+    lossy = out_path.suffix.lower() in (".jpg", ".jpeg", ".webp", ".avif")
+    if lossy or args.flatten:
+        matte = np.array(ImageColor.getrgb(args.flatten or "white")[:3], np.float64)
+        flat = np.empty((H, W, 3), np.uint8)
+        for a0 in range(0, H, 512):                     # in blocks to bound memory
+            blk = rgba[a0:a0 + 512]
+            al = blk[..., 3:4].astype(np.float64)
+            flat[a0:a0 + 512] = np.floor((blk[..., :3] * al + matte * (255 - al)) / 255 + 0.5)
+        method += f", flattened on {args.flatten or 'white'}"
+    if lossy:
+        fmt = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP", ".avif": "AVIF"}[out_path.suffix.lower()]
+        opts = {"JPEG": dict(optimize=True, progressive=True, subsampling="4:2:0"),
+                "WEBP": dict(method=6), "AVIF": dict(speed=4)}[fmt]
+        Image.fromarray(flat).save(out_path, fmt, quality=args.quality, **opts, **icc_kw)
+        method += f", {fmt} q{args.quality}"
+    elif args.flatten:
+        Image.fromarray(flat).save(out_path, "PNG", **icc_kw)
+    elif args.optimize == "off":
+        Image.fromarray(rgba).save(out_path, "PNG", **icc_kw)
+    else:
+        import oxipng
+        buf = io.BytesIO()
+        Image.fromarray(rgba).save(buf, "PNG", compress_level=1, **icc_kw)   # OxiPNG recompresses anyway
+        t = time.perf_counter()
+        kw = {"level": 6 if args.optimize == "max" else int(args.optimize)}
+        if args.zopfli:
+            kw["deflate"] = oxipng.Deflaters.zopfli(15)
+        data = oxipng.optimize_from_memory(buf.getvalue(), **kw)
+        out_path.write_bytes(data)
+        method += f", oxipng {args.optimize}{'+zopfli' if args.zopfli else ''} {time.perf_counter() - t:.1f}s"
     print(f"{W}x{H} <- mask {sw}x{sh} (x{W / sw:.2f}, {method}), bg alpha {args.bg_alpha:g}"
-          f"{', cleared' if args.clear_transparent else ''}{', ICC kept' if icc else ''} -> {out_path}")
+          f"{', cleared' if args.clear_transparent else ''}{', ICC kept' if icc else ''} -> {out_path} "
+          f"({out_path.stat().st_size / 1e6:.1f} MB)")
     return 0
 
 
